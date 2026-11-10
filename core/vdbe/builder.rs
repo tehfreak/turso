@@ -284,6 +284,9 @@ pub struct ProgramBuilder {
     /// that are deemed to be compile-time constant and can be hoisted out of loops
     /// so that they get evaluated only once at the start of the program.
     pub constant_spans: Vec<(usize, usize)>,
+    /// Whether [ProgramBuilder::emit_once_per_statement] is emitting, which
+    /// keeps its constant span open until it ends it.
+    emitting_once_per_statement: bool,
     /// Cursors that are referenced by the program. Indexed by [CursorKey].
     /// Certain types of cursors do not need a [CursorKey] (e.g. temp tables, sorter),
     /// because they never need to use [ProgramBuilder::resolve_cursor_id] to find it
@@ -862,6 +865,7 @@ impl ProgramBuilder {
             insns: Vec::with_capacity(opts.approx_num_insns),
             cursor_ref: Vec::with_capacity(opts.num_cursors),
             constant_spans: Vec::new(),
+            emitting_once_per_statement: false,
             label_to_resolved_offset: Vec::with_capacity(opts.approx_num_labels),
             explain: ExplainInfo::default(),
             parameters: Parameters::new(),
@@ -1169,11 +1173,34 @@ impl ProgramBuilder {
     /// where we think a parent expression is constant, but we decide during the evaluation
     /// of one of its children that it is not.
     pub fn constant_span_end_all(&mut self) {
+        if self.emitting_once_per_statement {
+            return;
+        }
         for span in self.constant_spans.iter_mut() {
             if span.1 == usize::MAX {
                 span.1 = self.insns.len().saturating_sub(1);
             }
         }
+    }
+
+    /// Emits the instructions of `emit` into the part of the program that runs
+    /// once when the statement starts, like the constants hoisted out of
+    /// loops, even if they are not constant: a call to `random()` there also
+    /// runs once per statement. They must not read any row.
+    pub fn emit_once_per_statement<T>(
+        &mut self,
+        emit: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        turso_assert!(
+            !self.constant_span_is_open() && !self.emitting_once_per_statement,
+            "code that runs once per statement is emitted outside other constant code"
+        );
+        let span = self.constant_span_start();
+        self.emitting_once_per_statement = true;
+        let result = emit(self);
+        self.emitting_once_per_statement = false;
+        self.constant_span_end(span);
+        result
     }
 
     /// Check if there is a constant span that is currently open.
