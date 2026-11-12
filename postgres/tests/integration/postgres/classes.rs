@@ -487,10 +487,18 @@ fn write_catalog_without_relpolicies(path: &str) {
     write_old_catalog(path, "relrowsecurity");
 }
 
+/// Writes a database at `path` with the catalog as the tursopg that added
+/// policies made it: every column, and a policy on `app.t` stored without
+/// an oid.
+fn write_catalog_with_policy_without_oid(path: &str) {
+    write_old_catalog(path, "relpolicies");
+}
+
 /// Writes a database at `path` with a catalog that has the columns of the
 /// first catalog and the later ones up to `last_column`: none for "",
-/// `relacl`, or `relacl` and `relrowsecurity`. It has a class row for the
-/// table `app.t`, written by hand.
+/// `relacl`, `relacl` and `relrowsecurity`, or all three, when `app.t` has
+/// a policy without an oid. It has a class row for the table `app.t`,
+/// written by hand.
 fn write_old_catalog(path: &str, last_column: &str) {
     let db = open_without_catalog(path);
     let conn = db.connect(turso_core::ConnectOpts::new()).unwrap();
@@ -502,6 +510,10 @@ fn write_old_catalog(path: &str, last_column: &str) {
         "relrowsecurity" => (
             ", relacl TEXT, relrowsecurity INTEGER NOT NULL DEFAULT 0",
             ", NULL, 0",
+        ),
+        "relpolicies" => (
+            ", relacl TEXT, relrowsecurity INTEGER NOT NULL DEFAULT 0, relpolicies TEXT",
+            r#", NULL, 1, '[{"polname":"one","polcmd":"*","polpermissive":true,"polroles":[-1],"polqual":"\"x\" = 1","polwithcheck":null}]'"#,
         ),
         _ => unreachable!("unknown catalog column {last_column}"),
     };
@@ -733,6 +745,139 @@ fn a_catalog_made_before_relpolicies_opens_read_only_without_the_column() {
 
 /// A table without a class row is one the engine made for itself. Nobody
 /// granted a role anything on it.
+/// The policies of `relname` as `(polname, oid)`, read from the catalog
+/// table, with a NULL oid as None.
+fn stored_policy_oids(conn: &Arc<Connection>, relname: &str) -> Vec<(String, Option<i64>)> {
+    conn.prepare(format!(
+        "SELECT json_extract(p.value, '$.polname'), json_extract(p.value, '$.oid') \
+         FROM __turso_internal_classes c, json_each(c.relpolicies) p \
+         WHERE c.relname = '{relname}' ORDER BY p.key"
+    ))
+    .unwrap()
+    .run_collect_rows()
+    .unwrap()
+    .into_iter()
+    .map(|row| (row[0].to_string(), row[1].as_int()))
+    .collect()
+}
+
+#[test]
+fn policies_take_oids_from_the_relation_oid_counter_and_keep_them_across_a_reopen() {
+    let db = TempDatabase::builder().build();
+    let pg = db.connect_postgres();
+    let conn = db.connect_limbo();
+    pg.execute("CREATE TABLE t (x INTEGER)").unwrap();
+    pg.execute("CREATE POLICY first ON t USING (x = 1)")
+        .unwrap();
+    pg.execute("CREATE POLICY second ON t USING (x = 2)")
+        .unwrap();
+    pg.execute("CREATE TABLE u (x INTEGER)").unwrap();
+    assert_eq!(
+        stored_policy_oids(&conn, "t"),
+        vec![
+            ("first".to_string(), Some(16385)),
+            ("second".to_string(), Some(16386))
+        ]
+    );
+    assert_eq!(class_row(&conn, "u").unwrap().0, 16387);
+
+    // The dropped policy had the highest oid, which is not used again.
+    pg.execute("DROP POLICY second ON t").unwrap();
+    pg.execute("CREATE POLICY third ON t USING (x = 3)")
+        .unwrap();
+    assert_eq!(
+        stored_policy_oids(&conn, "t"),
+        vec![
+            ("first".to_string(), Some(16385)),
+            ("third".to_string(), Some(16388))
+        ]
+    );
+
+    drop(pg);
+    drop(conn);
+    let db = db.reopen();
+    let pg = db.connect_postgres();
+    let conn = db.connect_limbo();
+    pg.execute("CREATE POLICY fourth ON t USING (x = 4)")
+        .unwrap();
+    assert_eq!(
+        stored_policy_oids(&conn, "t"),
+        vec![
+            ("first".to_string(), Some(16385)),
+            ("third".to_string(), Some(16388)),
+            ("fourth".to_string(), Some(16389))
+        ]
+    );
+}
+
+#[test]
+fn policies_stored_without_oids_get_them_when_the_database_is_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policy-without-oid.db");
+    let path = path.to_str().unwrap();
+    write_catalog_with_policy_without_oid(path);
+
+    // A read-only open cannot store the oid, and still applies the policy.
+    let db = open_pg_database(
+        path,
+        turso_core::OpenFlags::default() | turso_core::OpenFlags::ReadOnly,
+    );
+    let pg = turso_pg::Connection::connect(&db).unwrap();
+    let conn = db.connect(turso_core::ConnectOpts::new()).unwrap();
+    assert_eq!(
+        stored_policy_oids(&conn, "t"),
+        vec![("one".to_string(), None)]
+    );
+    let schema = conn.current_schema();
+    let app = schema.namespace_named("app").unwrap();
+    assert_eq!(
+        conn.dialect()
+            .row_security_policies(&schema, app, "t")
+            .len(),
+        1
+    );
+    drop(pg);
+    drop(conn);
+    drop(db);
+
+    let db = open_pg_database(path, turso_core::OpenFlags::default());
+    let pg = turso_pg::Connection::connect(&db).unwrap();
+    let conn = db.connect(turso_core::ConnectOpts::new()).unwrap();
+    assert_eq!(
+        stored_policy_oids(&conn, "t"),
+        vec![("one".to_string(), Some(16385))]
+    );
+    pg.execute("CREATE TABLE app.u (x int)").unwrap();
+    pg.execute("CREATE POLICY two ON app.t USING (x = 2)")
+        .unwrap();
+    assert_eq!(
+        class_row(&conn, "u").unwrap().0,
+        16386,
+        "the oid given at open is not used again"
+    );
+    assert_eq!(
+        stored_policy_oids(&conn, "t"),
+        vec![
+            ("one".to_string(), Some(16385)),
+            ("two".to_string(), Some(16387))
+        ]
+    );
+    pg.close().unwrap();
+    drop(pg);
+    drop(conn);
+    drop(db);
+
+    let db = open_pg_database(path, turso_core::OpenFlags::default());
+    let conn = db.connect(turso_core::ConnectOpts::new()).unwrap();
+    assert_eq!(
+        stored_policy_oids(&conn, "t"),
+        vec![
+            ("one".to_string(), Some(16385)),
+            ("two".to_string(), Some(16387))
+        ]
+    );
+}
+
 #[test]
 fn a_table_without_a_class_row_is_only_readable_by_superusers() {
     let db = TempDatabase::builder().build();
