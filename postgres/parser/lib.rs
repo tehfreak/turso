@@ -4,7 +4,8 @@ mod create_function;
 mod inline_function;
 mod names;
 pub use create_function::{
-    display_signature_type_name, is_base_type_name, return_type_mismatch_message, CalledFunction,
+    display_signature_type_name, is_base_type_name, return_type_mismatch_message,
+    statement_without_function_expansion, CalledFunction,
 };
 pub use inline_function::{inlined_function, InlinedFunction};
 use pg_query::NodeEnum;

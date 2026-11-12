@@ -262,6 +262,19 @@ impl Dialect for PostgresDialect {
         crate::classes::apply_relation_change(schema, change, values)
     }
 
+    fn expands_function_calls(&self, schema: &Schema) -> bool {
+        crate::function_calls::has_functions(schema)
+    }
+
+    fn expand_function_call(
+        &self,
+        schema: &Schema,
+        connection: &Connection,
+        call: &ast::Expr,
+    ) -> turso_core::Result<Option<ast::Expr>> {
+        crate::function_calls::expand_function_call(self, schema, connection, call)
+    }
+
     fn translate_create_function(
         &self,
         program: &mut turso_core::ProgramBuilder,
