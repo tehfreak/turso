@@ -1398,3 +1398,68 @@ test pg-policies-follows-renamed-and-dropped-tables {
 expect {
     pp_renamed_8|kept|(id = 1)
 }
+
+# The query that pg-meta, and through it Studio's policy editor, sends to
+# list policies, filtered to this test's table.
+test pg-meta-lists-policies {
+    CREATE ROLE pp_alice_9;
+    CREATE ROLE pp_bob_9;
+    CREATE TABLE pp_docs_9 (id INT, owner TEXT);
+    CREATE POLICY own ON pp_docs_9 FOR UPDATE TO pp_bob_9, pp_alice_9
+        USING (owner = current_user) WITH CHECK (id > 0);
+    CREATE POLICY everyone ON pp_docs_9 AS RESTRICTIVE USING (true);
+    SELECT schema, "table", name, action, roles, command, definition, "check"
+    FROM (
+        SELECT
+          pol.oid :: int8 AS id,
+          n.nspname AS schema,
+          c.relname AS table,
+          c.oid :: int8 AS table_id,
+          pol.polname AS name,
+          CASE
+            WHEN pol.polpermissive THEN 'PERMISSIVE' :: text
+            ELSE 'RESTRICTIVE' :: text
+          END AS action,
+          CASE
+            WHEN pol.polroles = '{0}' :: oid [] THEN array_to_json(
+              string_to_array('public' :: text, '' :: text) :: name []
+            )
+            ELSE array_to_json(
+              ARRAY(
+                SELECT
+                  pg_roles.rolname
+                FROM
+                  pg_roles
+                WHERE
+                  pg_roles.oid = ANY (pol.polroles)
+                ORDER BY
+                  pg_roles.rolname
+              )
+            )
+          END AS roles,
+          CASE
+            pol.polcmd
+            WHEN 'r' :: "char" THEN 'SELECT' :: text
+            WHEN 'a' :: "char" THEN 'INSERT' :: text
+            WHEN 'w' :: "char" THEN 'UPDATE' :: text
+            WHEN 'd' :: "char" THEN 'DELETE' :: text
+            WHEN '*' :: "char" THEN 'ALL' :: text
+            ELSE NULL :: text
+          END AS command,
+          pg_get_expr(pol.polqual, pol.polrelid) AS definition,
+          pg_get_expr(pol.polwithcheck, pol.polrelid) AS check
+        FROM
+          pg_policy pol
+          JOIN pg_class c ON c.oid = pol.polrelid
+          LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE
+          n.nspname IN ('public')
+          AND (c.relname || '.' || pol.polname) IN ('pp_docs_9.own', 'pp_docs_9.everyone')
+    ) policies
+    WHERE id > 0 AND id <> table_id
+    ORDER BY name;
+}
+expect {
+    public|pp_docs_9|everyone|RESTRICTIVE|["public"]|ALL|true|
+    public|pp_docs_9|own|PERMISSIVE|["pp_alice_9","pp_bob_9"]|UPDATE|(owner = CURRENT_USER)|(id > 0)
+}
