@@ -443,6 +443,9 @@ impl Statement {
     /// Query the database with this prepared statement.
     pub async fn query(&mut self, params: impl IntoParams) -> Result<Rows> {
         let operation_guard = self.conn.acquire_shared_operation()?;
+        self.conn
+            .maybe_handle_dangling_tx_without_operation_guard()
+            .await?;
         self.query_with_operation_guard(params, Some(operation_guard))
             .await
     }
@@ -484,6 +487,9 @@ impl Statement {
     /// Execute this prepared statement.
     pub async fn execute(&mut self, params: impl IntoParams) -> Result<u64> {
         let operation_guard = self.conn.acquire_shared_operation()?;
+        self.conn
+            .maybe_handle_dangling_tx_without_operation_guard()
+            .await?;
         self.execute_with_operation_guard(params, Some(operation_guard))
             .await
     }

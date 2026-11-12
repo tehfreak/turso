@@ -99,25 +99,9 @@ impl Connection {
     }
 
     pub(crate) async fn maybe_handle_dangling_tx(&self) -> Result<()> {
-        match self.dangling_tx.load(Ordering::SeqCst) {
-            DropBehavior::Rollback => {
-                let mut stmt = self.prepare("ROLLBACK").await?;
-                stmt.execute(()).await?;
-                self.dangling_tx
-                    .store(DropBehavior::Ignore, Ordering::SeqCst);
-            }
-            DropBehavior::Commit => {
-                let mut stmt = self.prepare("COMMIT").await?;
-                stmt.execute(()).await?;
-                self.dangling_tx
-                    .store(DropBehavior::Ignore, Ordering::SeqCst);
-            }
-            DropBehavior::Ignore => {}
-            DropBehavior::Panic => {
-                panic!("Transaction dropped unexpectedly.");
-            }
-        }
-        Ok(())
+        let _operation = self.acquire_shared_operation()?;
+        self.maybe_handle_dangling_tx_without_operation_guard()
+            .await
     }
 
     /// Query the database with SQL.
@@ -408,7 +392,7 @@ impl Connection {
         self.operation_gate.acquire_exclusive()
     }
 
-    async fn maybe_handle_dangling_tx_without_operation_guard(&self) -> Result<()> {
+    pub(crate) async fn maybe_handle_dangling_tx_without_operation_guard(&self) -> Result<()> {
         match self.dangling_tx.load(Ordering::SeqCst) {
             DropBehavior::Rollback => {
                 self.execute_without_operation_guard("ROLLBACK", ()).await?;

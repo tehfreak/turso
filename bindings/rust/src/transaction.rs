@@ -432,6 +432,76 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_drop_rollback_on_prepare() {
+        let mut conn = checked_memory_handle().await.unwrap();
+        {
+            let tx = conn.transaction().await.unwrap();
+            tx.execute("INSERT INTO foo VALUES(?)", &[1]).await.unwrap();
+        }
+
+        let result = conn
+            .prepare("SELECT count(*) FROM foo")
+            .await
+            .unwrap()
+            .query_row(())
+            .await
+            .unwrap();
+        assert_eq!(0, result.get::<i32>(0).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_drop_rollback_on_prepare_cached() {
+        let mut conn = checked_memory_handle().await.unwrap();
+        {
+            let tx = conn.transaction().await.unwrap();
+            tx.execute("INSERT INTO foo VALUES(?)", &[1]).await.unwrap();
+        }
+
+        let result = conn
+            .prepare_cached("SELECT count(*) FROM foo")
+            .await
+            .unwrap()
+            .query_row(())
+            .await
+            .unwrap();
+        assert_eq!(0, result.get::<i32>(0).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_drop_rollback_before_prepared_execute() {
+        let mut conn = checked_memory_handle().await.unwrap();
+        {
+            let tx = conn.transaction().await.unwrap();
+            tx.execute("INSERT INTO foo VALUES(?)", &[1]).await.unwrap();
+        }
+
+        conn.prepare("INSERT INTO foo VALUES(?)")
+            .await
+            .unwrap()
+            .execute(&[2])
+            .await
+            .unwrap();
+
+        // The new row must not be rolled back with the dropped transaction
+        let mut rows = conn.query("SELECT count(*) FROM foo", ()).await.unwrap();
+        let result = rows.next().await.unwrap().unwrap();
+        assert_eq!(1, result.get::<i32>(0).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_drop_rollback_on_statement_prepared_earlier() {
+        let mut conn = checked_memory_handle().await.unwrap();
+        let mut stmt = conn.prepare("SELECT count(*) FROM foo").await.unwrap();
+        {
+            let tx = conn.transaction().await.unwrap();
+            tx.execute("INSERT INTO foo VALUES(?)", &[1]).await.unwrap();
+        }
+
+        let result = stmt.query_row(()).await.unwrap();
+        assert_eq!(0, result.get::<i32>(0).unwrap());
+    }
+
+    #[tokio::test]
     async fn test_drop_rollback_on_clone() {
         let mut conn = checked_memory_handle().await.unwrap();
         let clone = conn.clone();
