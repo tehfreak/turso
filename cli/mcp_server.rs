@@ -561,8 +561,9 @@ impl TursoMcpServer {
             None => return Err("Missing path parameter".to_string()),
         };
 
-        // Create parent directories if needed
-        if path != ":memory:" {
+        // Create parent directories if needed. A `file:` URI is not a file system path,
+        // so its parent is not a directory to create.
+        if path != ":memory:" && !path.starts_with("file:") {
             let db_path = PathBuf::from(&path);
             if let Some(parent) = db_path.parent() {
                 if !parent.exists() {
@@ -1015,6 +1016,11 @@ mod tests {
             let server = memory_server();
             server.open_database(&Some(json!({ "path": uri }))).unwrap();
             assert_eq!(server.current_database(), memory, "open_database {uri}");
+            let uri_parent = PathBuf::from(&uri).parent().unwrap().to_path_buf();
+            assert!(
+                !uri_parent.exists(),
+                "open_database {uri} created {uri_parent:?}"
+            );
         }
     }
 
