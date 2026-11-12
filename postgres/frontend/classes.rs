@@ -290,7 +290,11 @@ impl ClassCatalog {
                 }
             }
             // The frontend has no objects of its own that are not relations.
-            RelationChange::DialectObject(_) => {}
+            RelationChange::DialectObject(_) => {
+                return Err(LimboError::InternalError(
+                    "the PostgreSQL frontend has no dialect objects".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -808,7 +812,11 @@ pub(crate) fn translate_relation_changes(
                 emit_class_row_set_row_security(program, &cursors, *namespace, name, change);
             }
             // The frontend has no objects of its own that are not relations.
-            RelationChange::DialectObject(_) => {}
+            RelationChange::DialectObject(_) => {
+                return Err(LimboError::InternalError(
+                    "the PostgreSQL frontend has no dialect objects".to_string(),
+                ));
+            }
         }
     }
     Ok(())
