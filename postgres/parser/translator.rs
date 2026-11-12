@@ -14,7 +14,7 @@ use crate::sqlstate::{
     SQLSTATE_INVALID_USE_OF_ESCAPE_CHARACTER, SQLSTATE_UNDEFINED_FUNCTION,
     SQLSTATE_UNDEFINED_TABLE, SQLSTATE_UNIQUE_VIOLATION,
 };
-use crate::ParseError;
+use crate::{CalledFunction, ParseError};
 use pg_query::protobuf::JoinType as PgJoinType;
 use pg_query::{NodeRef, ParseResult};
 use turso_parser::ast;
@@ -60,6 +60,7 @@ pub struct PostgreSQLTranslator {
     translating_index: std::cell::Cell<bool>,
     /// None when nothing is known about the schema, as in tests.
     relation_name_is_taken: Option<RelationNameCheck>,
+    called_functions: std::cell::RefCell<Vec<CalledFunction>>,
     parameter_numbers: std::cell::RefCell<Vec<i32>>,
 }
 
@@ -68,10 +69,32 @@ impl PostgreSQLTranslator {
         Self::default()
     }
 
+    /// The functions that the translated statements call, in the order of
+    /// translation. The translator sees every call that it translates, also
+    /// one in a column default or a constraint.
+    pub fn called_functions(&self) -> Vec<CalledFunction> {
+        self.called_functions.borrow().clone()
+    }
+
     /// The numbers of the parameters (`$1`, `$2`, ...) that the translated
     /// statements use, in the order of translation.
     pub fn parameter_numbers(&self) -> Vec<i32> {
         self.parameter_numbers.borrow().clone()
+    }
+
+    fn record_called_function(&self, call: &pg_query::protobuf::FuncCall) {
+        let Ok(names) = extract_key_columns(&call.funcname) else {
+            return;
+        };
+        let (schema, name) = match names.as_slice() {
+            [name] => (None, name),
+            [schema, name] => (Some(schema), name),
+            _ => return,
+        };
+        self.called_functions.borrow_mut().push(CalledFunction {
+            schema: schema.cloned(),
+            name: name.clone(),
+        });
     }
 
     /// A translator that names a serial column's sequence around the
@@ -2588,6 +2611,7 @@ impl PostgreSQLTranslator {
             }
         };
 
+        self.record_called_function(func_call);
         let func_name = function_name(&func_call.funcname)?;
         let func_name = func_name.as_str();
         if func_call.func_variadic
@@ -4174,6 +4198,7 @@ impl PostgreSQLTranslator {
         &self,
         func_call: &pg_query::protobuf::FuncCall,
     ) -> Result<ast::Expr, ParseError> {
+        self.record_called_function(func_call);
         let func_name = function_name(&func_call.funcname)?;
         if func_name.eq_ignore_ascii_case("substring")
             && func_call.args.get(1).is_some_and(is_text_pattern)
