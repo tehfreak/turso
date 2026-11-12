@@ -745,8 +745,8 @@ expect @tursopg error {
     a function with the name of relation "item" of the same schema is not supported
 }
 
-# The name of a function keeps its case, so "Item" and item are two names,
-# as in PostgreSQL.
+# In PostgreSQL "Item" and item are two names. tursopg rejects a function
+# name with an uppercase letter.
 test function-with-a-name-that-differs-in-case-from-a-table {
     CREATE TABLE item (a integer);
     CREATE FUNCTION "Item"() RETURNS integer LANGUAGE sql AS $$SELECT 1$$;
@@ -754,6 +754,10 @@ test function-with-a-name-that-differs-in-case-from-a-table {
 }
 expect {
     Item
+}
+@sqlstate 0A000
+expect @tursopg error {
+    a function name with an uppercase letter is not supported
 }
 
 test table-with-a-name-that-differs-in-case-from-a-function {
@@ -763,6 +767,10 @@ test table-with-a-name-that-differs-in-case-from-a-function {
 }
 expect {
     Item
+}
+@sqlstate 0A000
+expect @tursopg error {
+    a function name with an uppercase letter is not supported
 }
 
 # tursopg stores the name of a relation without its case, so the table
