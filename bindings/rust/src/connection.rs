@@ -100,6 +100,13 @@ impl Connection {
 
     pub(crate) async fn maybe_handle_dangling_tx(&self) -> Result<()> {
         match self.dangling_tx.load(Ordering::SeqCst) {
+            // The engine already ended the transaction, e.g. after ROLLBACK,
+            // ON CONFLICT ROLLBACK or SQLITE_FULL. The stored step would fail
+            // on every access and never clear.
+            DropBehavior::Rollback | DropBehavior::Commit if self.is_autocommit()? => {
+                self.dangling_tx
+                    .store(DropBehavior::Ignore, Ordering::SeqCst);
+            }
             DropBehavior::Rollback => {
                 let mut stmt = self.prepare("ROLLBACK").await?;
                 stmt.execute(()).await?;
@@ -410,6 +417,10 @@ impl Connection {
 
     async fn maybe_handle_dangling_tx_without_operation_guard(&self) -> Result<()> {
         match self.dangling_tx.load(Ordering::SeqCst) {
+            DropBehavior::Rollback | DropBehavior::Commit if self.is_autocommit()? => {
+                self.dangling_tx
+                    .store(DropBehavior::Ignore, Ordering::SeqCst);
+            }
             DropBehavior::Rollback => {
                 self.execute_without_operation_guard("ROLLBACK", ()).await?;
                 self.dangling_tx

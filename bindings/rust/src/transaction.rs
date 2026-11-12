@@ -431,6 +431,134 @@ mod test {
         assert_eq!(1, result.get::<i32>(0).unwrap());
     }
 
+    async fn assert_connection_usable(conn: &mut Connection) {
+        for _ in 0..2 {
+            let mut rows = conn.query("SELECT count(*) FROM foo", ()).await.unwrap();
+            rows.next().await.unwrap().unwrap();
+            drop(rows);
+            conn.execute("INSERT INTO foo VALUES(?)", &[2])
+                .await
+                .unwrap();
+            conn.execute_batch("INSERT INTO foo VALUES(3)")
+                .await
+                .unwrap();
+            let tx = conn.transaction().await.unwrap();
+            tx.commit().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drop_after_rollback_statement() {
+        let mut conn = checked_memory_handle().await.unwrap();
+        {
+            let tx = conn.transaction().await.unwrap();
+            tx.execute("INSERT INTO foo VALUES(?)", &[1]).await.unwrap();
+            tx.execute("ROLLBACK", ()).await.unwrap();
+            // Drop after the engine ended the transaction - there is nothing left to roll back
+        }
+
+        assert!(conn.is_autocommit().unwrap());
+        assert_connection_usable(&mut conn).await;
+    }
+
+    #[tokio::test]
+    async fn test_drop_after_or_rollback_conflict() {
+        let mut conn = checked_memory_handle().await.unwrap();
+        conn.execute("CREATE TABLE u (x INTEGER PRIMARY KEY)", ())
+            .await
+            .unwrap();
+        {
+            let tx = conn.transaction().await.unwrap();
+            tx.execute("INSERT INTO u VALUES(1)", ()).await.unwrap();
+            // ON CONFLICT ROLLBACK ends the whole transaction in the engine
+            let err = tx
+                .execute("INSERT OR ROLLBACK INTO u VALUES(1)", ())
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Constraint(_)), "{err}");
+        }
+
+        assert_connection_usable(&mut conn).await;
+    }
+
+    #[tokio::test]
+    async fn test_drop_after_database_full() {
+        let mut conn = checked_memory_handle().await.unwrap();
+        let mut rows = conn.query("PRAGMA page_count", ()).await.unwrap();
+        let pages = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        drop(rows);
+        let mut rows = conn
+            .query(format!("PRAGMA max_page_count = {pages}"), ())
+            .await
+            .unwrap();
+        while rows.next().await.unwrap().is_some() {}
+        drop(rows);
+        {
+            let tx = conn.transaction().await.unwrap();
+            // SQLITE_FULL ends the whole transaction in the engine
+            let err = tx
+                .execute("INSERT INTO foo VALUES(zeroblob(1048576))", ())
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::DatabaseFull(_)), "{err}");
+        }
+
+        assert_connection_usable(&mut conn).await;
+    }
+
+    #[tokio::test]
+    async fn test_finish_after_engine_rollback() {
+        let mut conn = checked_memory_handle().await.unwrap();
+        {
+            let tx = conn.transaction().await.unwrap();
+            tx.execute("ROLLBACK", ()).await.unwrap();
+            // finish() sees autocommit and returns Ok, but the Transaction is still in progress
+            tx.finish().await.unwrap();
+        }
+
+        assert_connection_usable(&mut conn).await;
+    }
+
+    #[tokio::test]
+    async fn test_drop_commit_after_engine_rollback() {
+        let mut conn = checked_memory_handle().await.unwrap();
+        {
+            let mut tx = conn.transaction().await.unwrap();
+            tx.set_drop_behavior(DropBehavior::Commit);
+            tx.execute("ROLLBACK", ()).await.unwrap();
+        }
+
+        assert_connection_usable(&mut conn).await;
+    }
+
+    #[tokio::test]
+    async fn test_drop_rollback_retried_after_statement_in_progress() {
+        let mut conn = checked_memory_handle().await.unwrap();
+        conn.execute("INSERT INTO foo VALUES(1), (2)", ())
+            .await
+            .unwrap();
+        let rows = {
+            let tx = conn.transaction().await.unwrap();
+            tx.execute("INSERT INTO foo VALUES(3)", ()).await.unwrap();
+            let mut rows = tx
+                .query("UPDATE foo SET x = x + 10 RETURNING x", ())
+                .await
+                .unwrap();
+            rows.next().await.unwrap().unwrap();
+            rows
+            // Drop while the RETURNING statement is still in progress
+        };
+
+        // The deferred ROLLBACK can fail here while the transaction is still open,
+        // so it has to stay pending until it succeeds
+        let _ = conn.query("SELECT 1", ()).await;
+        drop(rows);
+
+        let mut rows = conn.query("SELECT SUM(x) FROM foo", ()).await.unwrap();
+        let result = rows.next().await.unwrap().unwrap();
+        assert_eq!(3, result.get::<i32>(0).unwrap());
+    }
+
     #[tokio::test]
     async fn test_drop() -> Result<()> {
         let _ = tracing_subscriber::fmt::try_init();
