@@ -538,6 +538,8 @@ Notes on `CREATE FUNCTION`:
 - PostgreSQL stores a function before it checks the body, so a body can call
   the new function. tursopg checks the body before it stores the function,
   so the check does not find the new function.
+- A function and a table or view of the same schema cannot have the same
+  name. PostgreSQL accepts this.
 - The name of a function or of its schema cannot have a dot, and a function
   cannot be created in `pg_catalog`.
 - `DROP SCHEMA` fails for a schema that has functions; `CASCADE` drops
