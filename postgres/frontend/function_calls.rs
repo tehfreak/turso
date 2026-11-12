@@ -555,11 +555,7 @@ fn is_volatile_or_expensive(built_in_functions: BuiltInFunctions, argument: &ast
     let _ = walk_expr(argument, &mut |expression| {
         has_subquery_or_volatile_call |= match expression {
             ast::Expr::Subquery(_) | ast::Expr::Exists(_) | ast::Expr::InSelect { .. } => true,
-            ast::Expr::Literal(
-                ast::Literal::CurrentDate
-                | ast::Literal::CurrentTime
-                | ast::Literal::CurrentTimestamp,
-            ) => true,
+            ast::Expr::Literal(literal) => is_computed_at_each_use(literal),
             ast::Expr::FunctionCall { name, args, .. } => {
                 built_in_functions.is_volatile(name.as_str(), args.len())
             }
@@ -572,6 +568,23 @@ fn is_volatile_or_expensive(built_in_functions: BuiltInFunctions, argument: &ast
     });
     has_subquery_or_volatile_call
         || operator_cost(built_in_functions, argument).cost > MAX_OPERATORS_TO_COMPUTE_TWICE
+}
+
+/// Whether tursopg computes `literal` again at each use, so that two copies
+/// of it can be different.
+fn is_computed_at_each_use(literal: &ast::Literal) -> bool {
+    match literal {
+        ast::Literal::CurrentDate | ast::Literal::CurrentTime | ast::Literal::CurrentTimestamp => {
+            true
+        }
+        ast::Literal::Numeric(_)
+        | ast::Literal::String(_)
+        | ast::Literal::Blob(_)
+        | ast::Literal::Keyword(_)
+        | ast::Literal::Null
+        | ast::Literal::True
+        | ast::Literal::False => false,
+    }
 }
 
 /// PostgreSQL calls an argument expensive when it costs more than 10 times
@@ -614,7 +627,7 @@ fn operator_cost(built_in_functions: BuiltInFunctions, expression: &ast::Expr) -
         }
     };
     match expression {
-        ast::Expr::Literal(_) => free(true),
+        ast::Expr::Literal(literal) => free(!is_computed_at_each_use(literal)),
         ast::Expr::Variable(_)
         | ast::Expr::Id(_)
         | ast::Expr::Name(_)
