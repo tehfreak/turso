@@ -414,3 +414,26 @@ fn a_call_through_too_many_function_bodies_fails() {
     assert_eq!(error.sqlstate, "54001");
     assert_eq!(error.to_string(), "stack depth limit exceeded");
 }
+
+/// `uuid4_str` and `randomblob` are functions of tursopg that PostgreSQL
+/// does not have. Each call gives a new result, so two copies of the
+/// argument would be different.
+#[test]
+fn an_argument_that_calls_a_random_function_of_tursopg_is_not_computed_twice() {
+    let db = TempDatabase::builder().build();
+    let pg = db.connect_postgres();
+    pg.execute("CREATE FUNCTION same(text) RETURNS boolean LANGUAGE sql AS $$SELECT $1 = $1$$")
+        .unwrap();
+    for call in [
+        "SELECT same(uuid4_str())",
+        "SELECT same(hex(randomblob(4)))",
+    ] {
+        let error = pg.prepare(call).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "a call of function \"same\" with a volatile or expensive argument that the body \
+             uses more than once is not supported",
+            "{call}"
+        );
+    }
+}

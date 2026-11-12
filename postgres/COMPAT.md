@@ -570,10 +570,17 @@ Notes on calls of SQL functions:
   a CHECK constraint and an index.
 - A call of a function that PostgreSQL does not inline is rejected: the body
   is not a plain `SELECT` of one expression (it has FROM, WHERE, GROUP BY,
-  ORDER BY, LIMIT, a set operation, a subquery or an aggregate).
-- A call of a function whose body uses a parameter more than once is
-  rejected. PostgreSQL inlines such a function unless the argument is
-  volatile or expensive.
+  ORDER BY, LIMIT, a set operation, a subquery or an aggregate), or the body
+  uses a parameter more than once and the argument is volatile, has a
+  subquery, or costs more than 10 operators. The cost is an estimate:
+  tursopg does not know which casts are free in PostgreSQL.
+- tursopg does not have the STABLE class of PostgreSQL. A function is
+  volatile when `pg_proc.provolatile` of tursopg shows `v`, which includes
+  functions that PostgreSQL calls STABLE or IMMUTABLE, such as `now()` and
+  `make_date`. `CURRENT_DATE`, `CURRENT_TIME` and `CURRENT_TIMESTAMP` are
+  volatile too, because tursopg computes them again at each use. A call with
+  such an argument is rejected when the body uses the parameter more than
+  once, where PostgreSQL inlines the function.
 - PostgreSQL chooses between functions of one name by the types of the
   arguments. tursopg does not know these types, so it rejects a call of a
   name that several functions of the searched schemas have.

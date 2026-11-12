@@ -14,7 +14,9 @@
 
 use turso_core::namespace::NamespaceId;
 use turso_core::schema::Schema;
-use turso_core::{walk_expr, walk_expr_mut, Connection, Func, LimboError, WalkControl};
+use turso_core::{
+    walk_expr, walk_expr_mut, Connection, Deterministic, Func, LimboError, WalkControl,
+};
 use turso_parser::ast;
 use turso_parser::parser::MAX_EXPR_DEPTH;
 use turso_pg_parser::sqlstate::{
@@ -163,13 +165,15 @@ impl Expansion<'_> {
         check_body_has_no_column(&inlined.result)?;
 
         let (mut expression, use_counts) = with_arguments(inlined, args)?;
-        // PostgreSQL does not inline a function that would compute a
-        // volatile or an expensive argument more than once. tursopg cannot
-        // tell such an argument yet.
-        if use_counts.iter().any(|use_count| *use_count > 1) {
-            return Err(not_supported(format!(
-                "a call of function \"{name}\", whose body uses a parameter more than once,"
-            )));
+        for (argument, use_count) in args.iter().zip(use_counts) {
+            // PostgreSQL does not inline a function that would compute such
+            // an argument more than once.
+            if use_count > 1 && is_volatile_or_expensive(self.built_in_functions, argument) {
+                return Err(not_supported(format!(
+                    "a call of function \"{name}\" with a volatile or expensive argument that \
+                     the body uses more than once"
+                )));
+            }
         }
         self.active.push(function.oid);
         let expanded = self.expand_calls_in(&mut expression);
@@ -262,6 +266,7 @@ struct BuiltInFunctions<'a> {
 struct BuiltInFunction {
     /// An aggregate or a window function.
     is_aggregate: bool,
+    is_deterministic: bool,
 }
 
 impl BuiltInFunctions<'_> {
@@ -275,13 +280,17 @@ impl BuiltInFunctions<'_> {
         if let Ok(Some(function)) = self.dialect.resolve_function(name, argument_count) {
             return Some(BuiltInFunction {
                 is_aggregate: matches!(function, Func::Agg(_) | Func::Window(_)),
+                is_deterministic: function.is_deterministic(),
             });
         }
         self.connection
             .get_syms_functions()
             .into_iter()
             .find(|(function_name, ..)| function_name.eq_ignore_ascii_case(name))
-            .map(|(_, is_aggregate, ..)| BuiltInFunction { is_aggregate })
+            .map(|(_, is_aggregate, _, is_deterministic)| BuiltInFunction {
+                is_aggregate,
+                is_deterministic,
+            })
     }
 
     /// Whether `expression` is a call of an aggregate or a window function.
@@ -307,6 +316,18 @@ impl BuiltInFunctions<'_> {
             }
             _ => false,
         }
+    }
+
+    /// Whether two calls of the function that a call of `name` with
+    /// `argument_count` arguments runs can give different results for the
+    /// same arguments in one statement. The engine's flag for a function
+    /// that is not deterministic says this, as `pg_proc.provolatile` shows.
+    /// An aggregate or a window function is not volatile: PostgreSQL
+    /// computes it one time where a query uses it. A function that tursopg
+    /// does not have is volatile.
+    fn is_volatile(&self, name: &str, argument_count: usize) -> bool {
+        self.get(name, argument_count)
+            .is_none_or(|function| !function.is_aggregate && !function.is_deterministic)
     }
 }
 
@@ -493,6 +514,161 @@ fn is_user_function(
         .next()
         .is_some()
     })
+}
+
+/// Whether PostgreSQL refuses to compute `argument` more than once:
+/// `argument` has a subquery, calls a volatile function, or costs more than
+/// 10 operators.
+///
+/// PostgreSQL has three classes of functions: IMMUTABLE, STABLE (one result
+/// in a statement, such as `now()` and `CURRENT_DATE`) and VOLATILE. tursopg
+/// only knows if a function is deterministic. A function that is not
+/// deterministic is volatile here, also when PostgreSQL calls it STABLE,
+/// because tursopg computes it again at each call.
+fn is_volatile_or_expensive(built_in_functions: BuiltInFunctions, argument: &ast::Expr) -> bool {
+    let mut has_subquery_or_volatile_call = false;
+    let _ = walk_expr(argument, &mut |expression| {
+        has_subquery_or_volatile_call |= match expression {
+            ast::Expr::Subquery(_) | ast::Expr::Exists(_) | ast::Expr::InSelect { .. } => true,
+            ast::Expr::Literal(
+                ast::Literal::CurrentDate
+                | ast::Literal::CurrentTime
+                | ast::Literal::CurrentTimestamp,
+            ) => true,
+            ast::Expr::FunctionCall { name, args, .. } => {
+                built_in_functions.is_volatile(name.as_str(), args.len())
+            }
+            ast::Expr::FunctionCallStar { name, .. } => {
+                built_in_functions.is_volatile(name.as_str(), 0)
+            }
+            _ => false,
+        };
+        Ok(WalkControl::Continue)
+    });
+    has_subquery_or_volatile_call
+        || operator_cost(built_in_functions, argument).cost > MAX_OPERATORS_TO_COMPUTE_TWICE
+}
+
+/// PostgreSQL calls an argument expensive when it costs more than 10 times
+/// `cpu_operator_cost`.
+const MAX_OPERATORS_TO_COMPUTE_TWICE: usize = 10;
+
+/// What PostgreSQL charges to compute an expression, in operators.
+struct OperatorCost {
+    cost: usize,
+    /// Whether PostgreSQL computes the expression when it plans the
+    /// statement, which makes the expression free to compute again.
+    is_constant: bool,
+}
+
+/// An estimate of `cost_qual_eval` of PostgreSQL for `expression`, after
+/// PostgreSQL has computed its constant parts. PostgreSQL charges one
+/// operator for each function call, operator and cast that it cannot compute
+/// when it plans, and nothing for AND, OR, NOT and the null tests. tursopg
+/// does not know the types, so it charges each cast, also one that changes
+/// nothing in PostgreSQL. An expression that this estimate does not know is
+/// expensive.
+fn operator_cost(built_in_functions: BuiltInFunctions, expression: &ast::Expr) -> OperatorCost {
+    let free = |is_constant| OperatorCost {
+        cost: 0,
+        is_constant,
+    };
+    let sum = |own_cost: usize, own_is_immutable: bool, parts: &[&ast::Expr]| {
+        let parts: Vec<_> = parts
+            .iter()
+            .map(|part| operator_cost(built_in_functions, part))
+            .collect();
+        let is_constant = own_is_immutable && parts.iter().all(|part| part.is_constant);
+        OperatorCost {
+            cost: if is_constant {
+                0
+            } else {
+                own_cost + parts.iter().map(|part| part.cost).sum::<usize>()
+            },
+            is_constant,
+        }
+    };
+    match expression {
+        ast::Expr::Literal(_) => free(true),
+        ast::Expr::Variable(_)
+        | ast::Expr::Id(_)
+        | ast::Expr::Name(_)
+        | ast::Expr::Qualified(..)
+        | ast::Expr::DoublyQualified(..)
+        | ast::Expr::Column { .. }
+        | ast::Expr::RowId { .. } => free(false),
+        ast::Expr::Parenthesized(parts) => match parts.as_slice() {
+            [part] => operator_cost(built_in_functions, part),
+            // A row value. PostgreSQL charges for its parts only.
+            parts => {
+                let parts: Vec<&ast::Expr> = parts.iter().map(|part| part.as_ref()).collect();
+                sum(0, true, &parts)
+            }
+        },
+        ast::Expr::Collate(part, _) | ast::Expr::IsNull(part) | ast::Expr::NotNull(part) => {
+            sum(0, true, &[part])
+        }
+        ast::Expr::Unary(ast::UnaryOperator::Not, part) => sum(0, true, &[part]),
+        ast::Expr::Unary(_, part) => sum(1, true, &[part]),
+        ast::Expr::Binary(left, ast::Operator::And | ast::Operator::Or, right) => {
+            sum(0, true, &[left, right])
+        }
+        ast::Expr::Binary(left, _, right) => sum(1, true, &[left, right]),
+        ast::Expr::Cast { expr, .. } => sum(1, true, &[expr]),
+        ast::Expr::Between {
+            lhs, start, end, ..
+        } => sum(2, true, &[lhs, start, end]),
+        ast::Expr::Like {
+            lhs, rhs, escape, ..
+        } => {
+            let mut parts: Vec<&ast::Expr> = vec![lhs, rhs];
+            parts.extend(escape.as_deref());
+            sum(1, true, &parts)
+        }
+        ast::Expr::InList { lhs, rhs, .. } => {
+            let mut parts: Vec<&ast::Expr> = vec![lhs];
+            parts.extend(rhs.iter().map(|part| part.as_ref()));
+            // PostgreSQL expects to compare with half of the list.
+            sum(rhs.len().div_ceil(2), true, &parts)
+        }
+        ast::Expr::Case {
+            base,
+            when_then_pairs,
+            else_expr,
+        } => {
+            let mut parts: Vec<&ast::Expr> = Vec::new();
+            parts.extend(base.as_deref());
+            for (when, then) in when_then_pairs {
+                parts.push(when);
+                parts.push(then);
+            }
+            parts.extend(else_expr.as_deref());
+            // `CASE base WHEN value` compares the base with each value.
+            let comparisons = if base.is_some() {
+                when_then_pairs.len()
+            } else {
+                0
+            };
+            sum(comparisons, true, &parts)
+        }
+        // PostgreSQL charges nothing for an aggregate or a window function
+        // where a query uses its result, and nothing for its arguments: the
+        // query computes them one time for each group or row.
+        call if built_in_functions.is_aggregate_call(call) => free(false),
+        ast::Expr::FunctionCall { name, args, .. } => {
+            let is_immutable = !built_in_functions.is_volatile(name.as_str(), args.len());
+            let parts: Vec<&ast::Expr> = args.iter().map(|part| part.as_ref()).collect();
+            sum(1, is_immutable, &parts)
+        }
+        _ => expensive(),
+    }
+}
+
+fn expensive() -> OperatorCost {
+    OperatorCost {
+        cost: MAX_OPERATORS_TO_COMPUTE_TWICE + 1,
+        is_constant: false,
+    }
 }
 
 /// The functions of users that a call names `name`: the functions of schema
