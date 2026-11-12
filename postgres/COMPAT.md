@@ -573,7 +573,9 @@ Notes on calls of SQL functions:
   ORDER BY, LIMIT, a set operation, a subquery or an aggregate), or the body
   uses a parameter more than once and the argument is volatile, has a
   subquery, or costs more than 10 operators. The cost is an estimate:
-  tursopg does not know which casts are free in PostgreSQL.
+  tursopg does not know which casts are free in PostgreSQL, and it charges
+  one operator for a comparison of rows, where PostgreSQL charges one for
+  each column.
 - PostgreSQL computes a constant argument when it plans the statement.
   tursopg copies the argument to each place where the body uses the
   parameter. A call fails with SQLSTATE 54001 when the second and later

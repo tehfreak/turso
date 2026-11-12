@@ -616,6 +616,18 @@ expect {
     9|16|16|25
 }
 
+# The argument has 10 operators, which is the most that PostgreSQL computes
+# a second time.
+test argument-with-ten-operators-that-the-body-uses-twice {
+    CREATE FUNCTION square(integer) RETURNS integer LANGUAGE sql AS $$SELECT $1 * $1$$;
+    CREATE TABLE t (a integer);
+    INSERT INTO t VALUES (0);
+    SELECT square(a + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1) FROM t;
+}
+expect {
+    100
+}
+
 # PostgreSQL does not inline a function that would compute more than 10
 # operators a second time.
 test expensive-argument-that-the-body-uses-twice {
