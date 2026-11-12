@@ -574,6 +574,12 @@ Notes on calls of SQL functions:
   uses a parameter more than once and the argument is volatile, has a
   subquery, or costs more than 10 operators. The cost is an estimate:
   tursopg does not know which casts are free in PostgreSQL.
+- PostgreSQL computes a constant argument when it plans the statement.
+  tursopg copies the argument to each place where the body uses the
+  parameter. A call fails with SQLSTATE 54001 when the second and later
+  uses of the parameters of one body copy more than 10000 expressions,
+  which nested calls of a function that uses its parameter more than once
+  can do.
 - tursopg does not have the STABLE class of PostgreSQL. A function is
   volatile when `pg_proc.provolatile` of tursopg shows `v`, which includes
   functions that PostgreSQL calls STABLE or IMMUTABLE, such as `now()` and

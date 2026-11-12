@@ -164,7 +164,7 @@ impl Expansion<'_> {
         )?;
         check_body_has_no_column(&inlined.result)?;
 
-        let (mut expression, use_counts) = with_arguments(inlined, args)?;
+        let (mut expression, use_counts) = with_arguments(name, inlined, args)?;
         for (argument, use_count) in args.iter().zip(use_counts) {
             // PostgreSQL does not inline a function that would compute such
             // an argument more than once.
@@ -368,13 +368,16 @@ fn reject_aggregate_syntax(name: &str, call: &ast::Expr) -> turso_core::Result<(
     ))
 }
 
-/// The expression of `inlined` with `arguments` in the place of the
-/// parameters, and how many times the expression uses each parameter.
+/// The expression of `inlined`, the function `name`, with `arguments` in the
+/// place of the parameters, and how many times the expression uses each
+/// parameter.
 fn with_arguments(
+    name: &str,
     inlined: InlinedFunction,
     arguments: &[Box<ast::Expr>],
 ) -> turso_core::Result<(ast::Expr, Vec<usize>)> {
     let mut use_counts = vec![0; arguments.len()];
+    let mut copied_expressions = 0;
     let mut expression = inlined.result;
     walk_expr_mut(
         &mut expression,
@@ -394,6 +397,18 @@ fn with_arguments(
                 ));
             };
             use_counts[position] += 1;
+            if use_counts[position] > 1 {
+                copied_expressions += size(argument);
+                if copied_expressions > MAX_COPIED_EXPRESSIONS {
+                    return Err(sqlstate_error(
+                        SQLSTATE_STATEMENT_TOO_COMPLEX,
+                        format!(
+                            "the expression that takes the place of a call of function \
+                             \"{name}\" is too large"
+                        ),
+                    ));
+                }
+            }
             *expression = cast_argument(cast.clone(), argument);
             // A variable in the argument is a variable of the statement.
             Ok(WalkControl::SkipChildren)
@@ -401,6 +416,16 @@ fn with_arguments(
     )?;
     Ok((expression, use_counts))
 }
+
+/// How many expressions the second and later uses of the parameters of one
+/// body can copy from the arguments.
+///
+/// A call in an argument that a body uses twice is expanded two times, and
+/// its own argument four times, so the expression of nested calls can have
+/// a size that no statement text has. PostgreSQL computes a constant
+/// argument when it plans the statement and copies the result. tursopg
+/// copies the argument.
+const MAX_COPIED_EXPRESSIONS: usize = 10_000;
 
 /// `cast`, the cast of a parameter to its type, with `argument` in the
 /// place of the parameter.
@@ -690,6 +715,16 @@ fn functions_named<'a>(
     namespaces
         .into_iter()
         .flat_map(move |namespace| functions.named(namespace, &name))
+}
+
+/// The number of expressions in `expression`, with `expression`.
+fn size(expression: &ast::Expr) -> usize {
+    let mut size = 0;
+    let _ = walk_expr(expression, &mut |_| {
+        size += 1;
+        Ok(WalkControl::Continue)
+    });
+    size
 }
 
 /// The number of levels of `expression`: 1 for an expression that has no

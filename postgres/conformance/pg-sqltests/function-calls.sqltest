@@ -642,6 +642,29 @@ expect {
     144
 }
 
+# PostgreSQL computes the constant argument of each call when it plans the
+# statement. tursopg copies the argument, so the expression of the outer call
+# has 3 copies of the expression of the call in it.
+test nested-calls-with-a-constant-argument-that-the-body-uses-three-times {
+    CREATE FUNCTION same(integer) RETURNS integer LANGUAGE sql AS $$SELECT $1 + $1 - $1$$;
+    SELECT same(same(same(same(same(1)))));
+}
+expect {
+    1
+}
+
+test nested-calls-that-copy-their-arguments-too-many-times {
+    CREATE FUNCTION same(integer) RETURNS integer LANGUAGE sql AS $$SELECT $1 + $1 - $1$$;
+    SELECT same(same(same(same(same(same(same(same(same(same(same(same(same(same(1))))))))))))));
+}
+expect {
+    1
+}
+@sqlstate 54001
+expect @tursopg error {
+    the expression that takes the place of a call of function "same" is too large
+}
+
 test subquery-argument-that-the-body-uses-twice {
     CREATE FUNCTION square(integer) RETURNS integer LANGUAGE sql AS $$SELECT $1 * $1$$;
     SELECT square((SELECT 3));
