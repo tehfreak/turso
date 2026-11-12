@@ -432,6 +432,23 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_drop_rollback_on_clone() {
+        let mut conn = checked_memory_handle().await.unwrap();
+        let clone = conn.clone();
+        {
+            let tx = conn.transaction().await.unwrap();
+            tx.execute("INSERT INTO foo VALUES(?)", &[1]).await.unwrap();
+        }
+
+        // Both handles see the rollback, and it runs only once
+        for conn in [&clone, &conn] {
+            let mut rows = conn.query("SELECT count(*) FROM foo", ()).await.unwrap();
+            let result = rows.next().await.unwrap().unwrap();
+            assert_eq!(0, result.get::<i32>(0).unwrap());
+        }
+    }
+
+    #[tokio::test]
     async fn test_drop() -> Result<()> {
         let _ = tracing_subscriber::fmt::try_init();
         let mut conn = checked_memory_handle().await?;

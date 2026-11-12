@@ -63,7 +63,7 @@ pub struct Connection {
     /// We cannot do this eagerly on Drop because drop is not async.
     ///
     /// By default, the value is [DropBehavior::Ignore] which effectively does nothing.
-    pub(crate) dangling_tx: AtomicDropBehavior,
+    pub(crate) dangling_tx: Arc<AtomicDropBehavior>,
     pub(crate) extra_io: Option<Arc<dyn Fn(Waker) -> Result<()> + Send + Sync>>,
     pub(crate) operation_gate: Arc<ConnectionOperationGate>,
 }
@@ -75,7 +75,7 @@ impl Clone for Connection {
         Self {
             inner: self.inner.clone(),
             transaction_behavior: self.transaction_behavior,
-            dangling_tx: AtomicDropBehavior::new(self.dangling_tx.load(Ordering::SeqCst)),
+            dangling_tx: self.dangling_tx.clone(),
             extra_io: self.extra_io.clone(),
             operation_gate: self.operation_gate.clone(),
         }
@@ -91,7 +91,7 @@ impl Connection {
         let connection = Connection {
             inner: Some(conn),
             transaction_behavior: TransactionBehavior::Deferred,
-            dangling_tx: AtomicDropBehavior::new(DropBehavior::Ignore),
+            dangling_tx: Arc::new(AtomicDropBehavior::new(DropBehavior::Ignore)),
             extra_io,
             operation_gate: Arc::new(ConnectionOperationGate::new()),
         };
