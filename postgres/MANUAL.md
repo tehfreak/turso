@@ -165,7 +165,16 @@ runs for each row that the policy checks, and a subquery such as
 `(SELECT auth.uid())` that reads no column of the row runs once per query,
 so writing the call as a subquery is cheaper on large tables.
 
-`pg_policy` and `pg_policies` do not show the policies yet.
+`pg_policy` lists the policies, with oids that stay the same for as long as
+the policy exists. Its `polqual` and `polwithcheck` columns hold the
+conditions as the text that `pg_get_expr(polqual, polrelid)` returns, printed
+as PostgreSQL prints them, with every operator in parentheses and casts such
+as `'x'::text`, rather than PostgreSQL's internal form. Conditions are
+printed this way when they use columns, constants, comparisons, arithmetic,
+`AND`, `OR`, `NOT`, `IS [NOT] NULL`, `IN`, `BETWEEN`, `LIKE`, role keywords
+such as `current_user`, function calls and `(SELECT ...)` without `FROM`;
+other conditions, such as ones with casts or `CASE`, are shown as the
+engine's SQL. `pg_policies` does not show the policies yet.
 
 Materialized views store the rows of their query when they are refreshed, so
 a role that reads a materialized view built on a table with row-level

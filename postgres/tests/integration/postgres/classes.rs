@@ -761,6 +761,18 @@ fn stored_policy_oids(conn: &Arc<Connection>, relname: &str) -> Vec<(String, Opt
     .collect()
 }
 
+/// The policies as `(polname, oid)`, as pg_policy lists them.
+fn listed_policy_oids(pg: &turso_pg::Connection) -> Vec<(String, i64)> {
+    pg.query("SELECT polname, oid FROM pg_policy ORDER BY polname")
+        .unwrap()
+        .unwrap()
+        .run_collect_rows()
+        .unwrap()
+        .into_iter()
+        .map(|row| (row[0].to_string(), row[1].as_int().unwrap()))
+        .collect()
+}
+
 #[test]
 fn policies_take_oids_from_the_relation_oid_counter_and_keep_them_across_a_reopen() {
     let db = TempDatabase::builder().build();
@@ -836,6 +848,7 @@ fn policies_stored_without_oids_get_them_when_the_database_is_opened() {
             .len(),
         1
     );
+    assert_eq!(listed_policy_oids(&pg), vec![("one".to_string(), 0)]);
     drop(pg);
     drop(conn);
     drop(db);
@@ -847,6 +860,7 @@ fn policies_stored_without_oids_get_them_when_the_database_is_opened() {
         stored_policy_oids(&conn, "t"),
         vec![("one".to_string(), Some(16385))]
     );
+    assert_eq!(listed_policy_oids(&pg), vec![("one".to_string(), 16385)]);
     pg.execute("CREATE TABLE app.u (x int)").unwrap();
     pg.execute("CREATE POLICY two ON app.t USING (x = 2)")
         .unwrap();
